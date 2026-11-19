@@ -42,6 +42,7 @@ class OpenAIRunner:
     plugins: list = field(default_factory=list)
     provider: str = "openai"
     temperature: float = 0.4
+    user_id: str = "student"
     client_kwargs: dict = field(default_factory=dict)
     input_hooks: list[Callable[[str], str | None]] = field(default_factory=list)
     output_hooks: list[Callable[[str], str]] = field(default_factory=list)
@@ -90,7 +91,7 @@ class OpenAIRunner:
             role="user",
             parts=[types.Part.from_text(text=user_message)],
         )
-        ctx = _MockInvocationContext()
+        ctx = _MockInvocationContext(user_id=self.user_id)
         for plugin in self.plugins:
             cb = getattr(plugin, "on_user_message_callback", None)
             if cb is None:

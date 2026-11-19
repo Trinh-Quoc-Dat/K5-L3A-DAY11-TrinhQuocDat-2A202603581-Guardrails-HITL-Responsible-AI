@@ -13,6 +13,7 @@ from google.adk import runners
 from google.adk.plugins import base_plugin
 
 from core.utils import chat_with_agent
+from core.config import DEMO_SECRETS
 
 
 # ============================================================
@@ -41,12 +42,15 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+    "phone": r"\b0\d{9,10}\b",
+    "email": r"\b[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}\b",
+    "national_id": r"\b\d{9}\b|\b\d{12}\b",
+    "api_key": r"\bsk-[a-zA-Z0-9-]+\b",
+    "password": (
+        r"\b(?:admin\s+)?(?:password|passwd|pwd)"
+        r"\s+(?:is\s+)?[^\s,;]+"
+        r"|\b(?:password|passwd|pwd)\s*[:=]\s*[^\s,;]+"
+    ),
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -54,6 +58,18 @@ def content_filter(response: str) -> dict:
         if matches:
             issues.append(f"{name}: {len(matches)} found")
             redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+
+    # Redact the lab's complete protected-value set as well. This covers DB
+    # hosts and standalone credentials even when no label such as "password="
+    # appears next to them.
+    secret_matches = 0
+    for secret in sorted((s for s in DEMO_SECRETS if s), key=len, reverse=True):
+        count = response.casefold().count(secret.casefold())
+        if count:
+            secret_matches += count
+            redacted = re.sub(re.escape(secret), "[REDACTED]", redacted, flags=re.IGNORECASE)
+    if secret_matches:
+        issues.append(f"secret: {secret_matches} found")
 
     return {
         "safe": len(issues) == 0,
@@ -169,19 +185,45 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
 
         response_text = self._extract_text(llm_response)
+
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # 1. Check PII and secrets
+        filter_result = content_filter(response_text)
 
-        return llm_response  # TODO: modify if needed
+        if not filter_result["safe"]:
+            self.redacted_count += 1
+
+            # Replace original response with redacted content
+            llm_response.content = types.Content(
+                role="model",
+                parts=[
+                    types.Part(text=filter_result["redacted"])
+                ],
+            )
+
+        # 2. Optional LLM-as-Judge
+        if self.use_llm_judge:
+            judge_result = await llm_safety_check(response_text)
+
+            if not judge_result["safe"]:
+                self.blocked_count += 1
+
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            text=(
+                                "I'm sorry, but I cannot provide "
+                                "this response due to safety concerns."
+                            )
+                        )
+                    ],
+                )
+
+        # 3. Return modified response
+        return llm_response
 
 
 # ============================================================
